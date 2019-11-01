@@ -1315,5 +1315,4 @@ source "drivers/input/touchscreen/fts_touch/Kconfig"
 
 config WAKE_GESTURES
 	bool "wake gestures"
-
 endif

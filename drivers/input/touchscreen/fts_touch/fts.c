@@ -105,7 +105,6 @@ bool scr_suspended_coral(void)
 }
 #endif
 
-
 /* Use decimal-formatted raw data */
 #define RAW_DATA_FORMAT_DEC
 
@@ -5002,6 +5001,9 @@ static int fts_screen_state_chg_callback(struct notifier_block *nb,
 	}
 
 	pr_debug("%s: fts notifier begin!\n", __func__);
+
+	/* finish processing any events on queue */
+	flush_workqueue(info->event_wq);
 
 	blank = *(int *) (evdata->data);
 	switch (blank) {
