@@ -1,5 +1,7 @@
 /*
- * Copyright (C) 2014 Google, Inc.
+ * Author: andip71, 01.09.2017
+ *
+ * Version 1.1.0
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -12,9 +14,10 @@
  *
  */
 
-#ifndef _FIQ_WATCHDOG_H_
-#define _FIQ_WATCHDOG_H_
+#define BOEFFLA_WL_BLOCKER_VERSION	"1.1.0"
 
-void fiq_watchdog_triggered(const struct pt_regs *regs, void *svc_sp);
+#define LIST_WL_DEFAULT				"DIAG_WS"
 
-#endif
+#define LENGTH_LIST_WL				255
+#define LENGTH_LIST_WL_DEFAULT		100
+#define LENGTH_LIST_WL_SEARCH		LENGTH_LIST_WL + LENGTH_LIST_WL_DEFAULT + 5
