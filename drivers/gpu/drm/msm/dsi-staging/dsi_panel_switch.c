@@ -37,6 +37,11 @@
 #define DSI_WRITE_CMD_BUF(dsi, cmd) \
 	(IS_ERR_VALUE(mipi_dsi_dcs_write_buffer(dsi, cmd, ARRAY_SIZE(cmd))))
 
+#define S6E3HC2_DEFAULT_FPS 60
+
+static const u8 unlock_cmd[] = { 0xF0, 0x5A, 0x5A };
+static const u8 lock_cmd[]   = { 0xF0, 0xA5, 0xA5 };
+
 struct panel_switch_funcs {
 	struct panel_switch_data *(*create)(struct dsi_panel *panel);
 	void (*destroy)(struct panel_switch_data *pdata);
@@ -45,6 +50,7 @@ struct panel_switch_funcs {
 			       const struct dsi_display_mode *mode);
 	int (*post_enable)(struct panel_switch_data *pdata);
 	int (*support_update_hbm)(struct dsi_panel *panel);
+	int (*support_update_irc)(struct dsi_panel *panel, bool enable);
 	int (*send_nolp_cmds)(struct dsi_panel *panel);
 };
 
@@ -426,6 +432,19 @@ static int panel_update_hbm(struct dsi_panel *panel)
 	return pdata->funcs->support_update_hbm(panel);
 }
 
+static int panel_update_irc(struct dsi_panel *panel, bool enable)
+{
+	struct panel_switch_data *pdata = panel->private_data;
+
+	if (unlikely(!pdata || !pdata->funcs))
+		return -EINVAL;
+
+	if (!pdata->funcs->support_update_irc)
+		return -EOPNOTSUPP;
+
+	return pdata->funcs->support_update_irc(panel, enable);
+}
+
 static int panel_send_nolp(struct dsi_panel *panel)
 {
 	struct panel_switch_data *pdata = panel->private_data;
@@ -578,6 +597,7 @@ static const struct dsi_panel_funcs panel_funcs = {
 	.wakeup      = panel_wakeup,
 	.pre_lp1     = panel_flush_switch_queue,
 	.update_hbm  = panel_update_hbm,
+	.update_irc  = panel_update_irc,
 	.send_nolp   = panel_send_nolp,
 };
 
@@ -803,6 +823,20 @@ static void s6e3hc2_gamma_update(struct panel_switch_data *pdata,
 			pr_warn("failed sending gamma cmd 0x%02x\n",
 				s6e3hc2_gamma_tables[i].cmd);
 	}
+}
+
+static void s6e3hc2_gamma_update_reg_locked(struct panel_switch_data *pdata,
+				 const struct dsi_display_mode *mode)
+{
+	struct dsi_panel *panel = pdata->panel;
+	struct mipi_dsi_device *dsi = &panel->mipi_device;
+
+	if (unlikely(!mode))
+		return;
+
+	DSI_WRITE_CMD_BUF(dsi, unlock_cmd);
+	s6e3hc2_gamma_update(pdata, mode);
+	DSI_WRITE_CMD_BUF(dsi, lock_cmd);
 }
 
 static bool s6e3hc2_is_gamma_available(struct dsi_panel *panel)
@@ -1252,8 +1286,6 @@ static int s6e3hc2_gamma_read_tables(struct panel_switch_data *pdata)
 	struct s6e3hc2_switch_data *sdata;
 	const struct dsi_display_mode *mode;
 	struct mipi_dsi_device *dsi;
-	const u8 unlock_cmd[] = { 0xF0, 0x5A, 0x5A };
-	const u8 lock_cmd[]   = { 0xF0, 0xA5, 0xA5 };
 	int i, rc = 0;
 
 	if (unlikely(!pdata || !pdata->panel))
@@ -1516,9 +1548,10 @@ static int s6e3hc2_switch_mode_update(struct dsi_panel *panel,
 		return -EINVAL;
 
 	/* display is expected not to operate in HBM mode for the first bl range
-	 * (cur_range = 0) when panel->hbm_mode is true
+	 * (cur_range = 0) when panel->hbm_mode is not off
 	 */
-	data.hbm_enable = panel->hbm_mode == true && hbm->cur_range != 0;
+	data.hbm_enable = (panel->hbm_mode != HBM_MODE_OFF) &&
+			hbm->cur_range != 0;
 	data.dimming_active = panel->bl_config.hbm->dimming_active;
 	data.refresh_rate = mode->timing.refresh_rate;
 
@@ -1532,13 +1565,52 @@ static int s6e3hc2_update_hbm(struct dsi_panel *panel)
 	return s6e3hc2_switch_mode_update(panel, pdata->display_mode, true);
 }
 
+#define S6E3HC2_READ_IRC       0x95
+#define S6E3HC2_IRC_BIT        0x20
+
+static int s6e3hc2_update_irc(struct dsi_panel *panel, bool enable)
+{
+	static struct {
+		bool init;
+		u8 cmd[3];
+	} irc_data;
+
+	struct mipi_dsi_device *dsi = &panel->mipi_device;
+	int rc;
+
+	pr_debug("irc update: %d\n", enable);
+
+	if (DSI_WRITE_CMD_BUF(dsi, unlock_cmd))
+		return -EFAULT;
+
+	if (!irc_data.init) {
+		irc_data.cmd[0] = S6E3HC2_READ_IRC;
+		rc = mipi_dsi_dcs_read(dsi, S6E3HC2_READ_IRC,
+				       &irc_data.cmd[1], 2);
+		if (rc != 2) {
+			pr_warn("Unable to read irc register\n");
+			DSI_WRITE_CMD_BUF(dsi, lock_cmd);
+			return -EFAULT;
+		}
+		irc_data.init = true;
+	}
+
+	if (enable)
+		irc_data.cmd[2] |= S6E3HC2_IRC_BIT;
+	else
+		irc_data.cmd[2] &= ~(S6E3HC2_IRC_BIT);
+
+	DSI_WRITE_CMD_BUF(dsi, irc_data.cmd);
+	DSI_WRITE_CMD_BUF(dsi, lock_cmd);
+
+	return 0;
+}
+
 static void s6e3hc2_perform_switch(struct panel_switch_data *pdata,
 				   const struct dsi_display_mode *mode)
 {
 	struct dsi_panel *panel = pdata->panel;
 	struct mipi_dsi_device *dsi = &panel->mipi_device;
-	const u8 unlock_cmd[] = { 0xF0, 0x5A, 0x5A };
-	const u8 lock_cmd[]   = { 0xF0, 0xA5, 0xA5 };
 
 	if (!mode)
 		return;
@@ -1586,15 +1658,19 @@ int s6e3hc2_send_nolp_cmds(struct dsi_panel *panel)
 static int s6e3hc2_post_enable(struct panel_switch_data *pdata)
 {
 	struct s6e3hc2_switch_data *sdata;
+	const struct dsi_display_mode *mode;
 
 	if (unlikely(!pdata || !pdata->panel))
 		return -ENOENT;
 
 	sdata = container_of(pdata, struct s6e3hc2_switch_data, base);
+	mode = pdata->panel->cur_mode;
 
 	kthread_flush_work(&sdata->gamma_work);
 	if (sdata->gamma_state == GAMMA_STATE_UNINITIALIZED)
 		kthread_queue_work(&pdata->worker, &sdata->gamma_work);
+	else if (mode && mode->timing.refresh_rate != S6E3HC2_DEFAULT_FPS)
+		s6e3hc2_gamma_update_reg_locked(pdata, mode);
 
 	return 0;
 }
@@ -1605,6 +1681,7 @@ const struct panel_switch_funcs s6e3hc2_switch_funcs = {
 	.perform_switch     = s6e3hc2_perform_switch,
 	.post_enable        = s6e3hc2_post_enable,
 	.support_update_hbm = s6e3hc2_update_hbm,
+	.support_update_irc = s6e3hc2_update_irc,
 	.send_nolp_cmds     = s6e3hc2_send_nolp_cmds,
 };
 
